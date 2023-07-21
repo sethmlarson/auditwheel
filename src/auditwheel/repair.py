@@ -126,6 +126,11 @@ def strip_symbols(libraries: Iterable[str]) -> None:
         check_call(["strip", "-s", lib])
 
 
+def find_lib_package_url(src_path: str) -> str|None:
+    print(f"Finding lib from path: {src_path}")
+    os.system(f"dnf repoquery -q -f {src_path}")
+
+
 def copylib(src_path: str, dest_dir: str, patcher: ElfPatcher) -> tuple[str, str]:
     """Graft a shared library from the system into the wheel and update the
     relevant links.
@@ -138,6 +143,8 @@ def copylib(src_path: str, dest_dir: str, patcher: ElfPatcher) -> tuple[str, str
     # Copy the a shared library from the system (src_path) into the wheel
     # if the library has a RUNPATH/RPATH we clear it and set RPATH to point to
     # its new location.
+
+    find_lib_package_url(src_path)
 
     with open(src_path, "rb") as f:
         shorthash = hashfile(f)[:8]
