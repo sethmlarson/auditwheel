@@ -7,6 +7,7 @@ import platform
 import re
 import shutil
 import stat
+import typing
 from os.path import abspath, basename, dirname, exists, isabs
 from os.path import join as pjoin
 from pathlib import Path
@@ -14,6 +15,7 @@ from subprocess import check_call
 from typing import Iterable
 
 from auditwheel.patcher import ElfPatcher
+from auditwheel.whichprovides import Provides, whichprovides
 
 from .elfutils import elf_read_dt_needed, elf_read_rpaths, is_subdir
 from .hashfile import hashfile
@@ -64,6 +66,8 @@ def repair_wheel(
 
         dest_dir = match.group("name") + lib_sdir
 
+        pkgs_provides: dict[str, Provides] = {}
+
         # here, fn is a path to an ELF file (lib or executable) in
         # the wheel, and v['libs'] contains its required libs
         for fn, v in external_refs_by_fn.items():
@@ -84,6 +88,8 @@ def repair_wheel(
                 if not exists(dest_dir):
                     os.mkdir(dest_dir)
                 new_soname, new_path = copylib(src_path, dest_dir, patcher)
+                if pkg_provides := whichprovides(src_path):
+                    pkgs_provides[new_path] = pkg_provides
                 soname_map[soname] = (new_soname, new_path)
                 replacements.append((soname, new_soname))
             if replacements:
@@ -117,6 +123,47 @@ def repair_wheel(
             libs_to_strip = [path for (_, path) in soname_map.values()]
             extensions = external_refs_by_fn.keys()
             strip_symbols(itertools.chain(libs_to_strip, extensions))
+
+        # If we grafted packages with identities we add an SBOM to the wheel.
+        if pkgs_provides:
+            sbom_components: list[dict[str, typing.Any]] = []
+            sbom_dependencies = [{"ref": "pkg:pypi/pillow@11.0.0", "dependsOn": []}]
+            sbom = {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.4",
+                "metadata": {
+                    "component": {
+                        "type": "library",
+                        "bom-ref": "pkg:pypi/pillow@11.0.0",
+                        "name": "Pillow",
+                        "version": "11.1.0",
+                        "purl": "pkg:pypi/pillow@11.0.0",
+                    }
+                },
+                # These are mutated below through the variables.
+                "components": sbom_components,
+                "dependencies": sbom_dependencies,
+            }
+            for path, pkg_provides in pkgs_provides.items():
+                sbom_components.append(
+                    {
+                        "type": "library",
+                        "bom-ref": pkg_provides.purl,
+                        "name": pkg_provides.package_name,
+                        "version": pkg_provides.package_version,
+                        "purl": pkg_provides.purl,
+                    }
+                )
+                sbom_dependencies[0]["dependsOn"].append(  # type: ignore[attr-defined]
+                    pkg_provides.purl
+                )
+                sbom_dependencies.append({"ref": pkg_provides.purl})
+
+            with open(os.path.join(dest_dir, "auditwheel.cdx.json"), mode="w") as f:
+                f.truncate()
+                import json
+
+                f.write(json.dumps(sbom, indent=2))
 
     return ctx.out_wheel
 
